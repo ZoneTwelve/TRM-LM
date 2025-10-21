@@ -1,18 +1,12 @@
+# models/layers.py
 from typing import Tuple
 import einops
 import torch
 from torch import nn
 import torch.nn.functional as F
-
-# try:
-#    from flash_attn_interface import flash_attn_func  # type: ignore[import]
-# except ImportError:
-#    # Fallback to FlashAttention 2
-#    from flash_attn import flash_attn_func  # type: ignore[import]
 from torch.nn.functional import scaled_dot_product_attention
 
 from models.common import trunc_normal_init_
-
 
 CosSin = Tuple[torch.Tensor, torch.Tensor]
 
@@ -75,7 +69,6 @@ class CastedEmbedding(nn.Module):
     ):
         super().__init__()
         self.cast_to = cast_to
-
         # Truncated LeCun normal init
         self.embedding_weight = nn.Parameter(
             trunc_normal_init_(
@@ -90,7 +83,6 @@ class CastedEmbedding(nn.Module):
 class RotaryEmbedding(nn.Module):
     def __init__(self, dim, max_position_embeddings, base, device=None):
         super().__init__()
-
         # RoPE
         inv_freq = 1.0 / (
             base ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim)
@@ -100,8 +92,9 @@ class RotaryEmbedding(nn.Module):
 
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = torch.cat((freqs, freqs), dim=-1)
-        self.cos_cached = nn.Buffer(emb.cos(), persistent=False)
-        self.sin_cached = nn.Buffer(emb.sin(), persistent=False)
+        # FIX 1: use register_buffer so these move with .to(device)
+        self.register_buffer("cos_cached", emb.cos(), persistent=False)
+        self.register_buffer("sin_cached", emb.sin(), persistent=False)
 
     def forward(self):
         return self.cos_cached, self.sin_cached
@@ -130,11 +123,11 @@ class Attention(nn.Module):
     def forward(self, cos_sin: CosSin, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, _ = hidden_states.shape
 
-        # hidden_states: [bs, seq_len, num_heads, head_dim]
+        # qkv: [B, S, (H + 2*KV), D]
         qkv = self.qkv_proj(hidden_states)
 
         # Split head
-        qkv = qkv.view(
+        qkv = qkv.reshape(  # FIX 2: use reshape to be robust to non-contiguity
             batch_size,
             seq_len,
             self.num_heads + 2 * self.num_key_value_heads,
@@ -149,22 +142,26 @@ class Attention(nn.Module):
             cos, sin = cos_sin
             query, key = apply_rotary_pos_emb(query, key, cos, sin)
 
-        # flash attn
+        # SDPA expects B,H,S,D; ensure dtypes match
         query, key, value = map(
             lambda t: einops.rearrange(t, "B S H D -> B H S D"), (query, key, value)
-        )  # needed for scaled_dot_product_attention but not flash_attn_func
+        )
+        # FIX 3: cast value to the same dtype as query (q/k are already cast in RoPE)
+        value = value.to(query.dtype)
+
         attn_output = scaled_dot_product_attention(
             query=query, key=key, value=value, is_causal=self.causal
         )
         attn_output = einops.rearrange(attn_output, "B H S D -> B S H D")
-        attn_output = attn_output.view(batch_size, seq_len, self.output_size)  # type: ignore
+        attn_output = attn_output.reshape(
+            batch_size, seq_len, self.output_size
+        )  # FIX 2
         return self.o_proj(attn_output)
 
 
 class LinearSwish(nn.Module):
     def __init__(self, hidden_size: int, reverse=False):
         super().__init__()
-
         self.linear = CastedLinear(hidden_size, hidden_size, bias=False)
         self.reverse = reverse
 
@@ -179,7 +176,6 @@ class SwiGLU(nn.Module):
     def __init__(self, hidden_size: int, expansion: float):
         super().__init__()
         inter = _find_multiple(round(expansion * hidden_size * 2 / 3), 256)
-
         self.gate_up_proj = CastedLinear(hidden_size, inter * 2, bias=False)
         self.down_proj = CastedLinear(inter, hidden_size, bias=False)
 
@@ -191,7 +187,6 @@ class SwiGLU(nn.Module):
 def rms_norm(hidden_states: torch.Tensor, variance_epsilon: float) -> torch.Tensor:
     input_dtype = hidden_states.dtype
     hidden_states = hidden_states.to(torch.float32)
-
     variance = hidden_states.square().mean(-1, keepdim=True)
     hidden_states = hidden_states * torch.rsqrt(variance + variance_epsilon)
     return hidden_states.to(input_dtype)

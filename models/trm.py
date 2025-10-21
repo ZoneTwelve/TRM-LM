@@ -1,14 +1,5 @@
-# ==================================================
-# Tiny Recursive Model (TRM)
-# This implementation is based on the "Tiny Recursive Model (TRM)" approach:
-#   Martineau et al., "Less Is More: Recursive Reasoning with Tiny Networks",
-#   GitHub reference:
-#       https://github.com/SamsungSAILMontreal/TinyRecursiveModels/blob/main/models/recursive_reasoning/trm.py
-# Key concept:
-# This yields strong generalization on structured reasoning tasks (e.g., puzzle
-# solving, ARC-AGI benchmarks) with far fewer parameters than typical large
-# language models. :contentReference[oaicite:2]{index=2}from typing import Tuple, List, Dict, Optional
-#
+# models/trm.py
+from typing import Tuple, List, Dict, Optional
 from dataclasses import dataclass
 import math
 import torch
@@ -29,8 +20,6 @@ from models.layers import (
     CastedLinear,
 )
 from models.sparse_embedding import CastedSparseEmbedding
-
-from typing import Dict, List, Tuple
 
 IGNORE_LABEL_ID = -100
 
@@ -115,7 +104,6 @@ class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
         self.norm_eps = config.rms_norm_eps
 
     def forward(self, cos_sin: CosSin, hidden_states: torch.Tensor) -> torch.Tensor:
-        # B, L, D = hidden_states.shape
         # Post Norm
         if self.config.mlp_t:
             hidden_states = hidden_states.transpose(1, 2)
@@ -158,7 +146,6 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         self.forward_dtype = getattr(torch, self.config.forward_dtype)
 
         # I/O
-
         self.embed_scale = math.sqrt(self.config.hidden_size)
         embed_init_std = 1.0 / self.embed_scale
 
@@ -173,11 +160,18 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         )
         self.q_head = CastedLinear(self.config.hidden_size, 2, bias=True)
 
+        # Compute puzzle lengths:
+        # - user-configured logical length
         self.puzzle_emb_len = (
             -(self.config.puzzle_emb_ndim // -self.config.hidden_size)
             if self.config.puzzle_emb_len == 0
             else self.config.puzzle_emb_len
-        )  # ceil div
+        )
+        # - effective padded length (only when puzzle embeddings are actually used)
+        self.eff_padded_len = (
+            self.puzzle_emb_len if self.config.puzzle_emb_ndim > 0 else 0
+        )
+
         if self.config.puzzle_emb_ndim > 0:
             # Zero init puzzle embeddings
             self.puzzle_emb = CastedSparseEmbedding(
@@ -188,16 +182,16 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
                 cast_to=self.forward_dtype,
             )
 
-        # LM Blocks
+        # Positional encodings
         if self.config.pos_encodings == "rope":
             self.rotary_emb = RotaryEmbedding(
                 dim=self.config.hidden_size // self.config.num_heads,
-                max_position_embeddings=self.config.seq_len + self.puzzle_emb_len,
+                max_position_embeddings=self.config.seq_len + self.eff_padded_len,
                 base=self.config.rope_theta,
             )
         elif self.config.pos_encodings == "learned":
             self.embed_pos = CastedEmbedding(
-                self.config.seq_len + self.puzzle_emb_len,
+                self.config.seq_len + self.eff_padded_len,
                 self.config.hidden_size,
                 init_std=embed_init_std,
                 cast_to=self.forward_dtype,
@@ -213,19 +207,16 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
             ]
         )
 
-        # Initial states
-        self.H_init = nn.Buffer(
-            trunc_normal_init_(
-                torch.empty(self.config.hidden_size, dtype=self.forward_dtype), std=1
-            ),
-            persistent=True,
+        # Initial states (buffers)
+        # Broadcasting 1D -> [B, L, D] is intentional
+        H_buf = trunc_normal_init_(
+            torch.empty(self.config.hidden_size, dtype=self.forward_dtype), std=1
         )
-        self.L_init = nn.Buffer(
-            trunc_normal_init_(
-                torch.empty(self.config.hidden_size, dtype=self.forward_dtype), std=1
-            ),
-            persistent=True,
+        L_buf = trunc_normal_init_(
+            torch.empty(self.config.hidden_size, dtype=self.forward_dtype), std=1
         )
+        self.register_buffer("H_init", H_buf, persistent=True)
+        self.register_buffer("L_init", L_buf, persistent=True)
 
         # Q head special init
         # Init Q to (almost) zero for faster learning during bootstrapping
@@ -235,7 +226,7 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
 
     def _input_embeddings(self, input: torch.Tensor, puzzle_identifiers: torch.Tensor):
         # Token embedding
-        embedding = self.embed_tokens(input.to(torch.int32))
+        embedding = self.embed_tokens(input.to(torch.int32))  # [B, seq_len, D]
 
         # Puzzle embeddings
         if self.config.puzzle_emb_ndim > 0:
@@ -248,6 +239,7 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
             if pad_count > 0:
                 puzzle_embedding = F.pad(puzzle_embedding, (0, pad_count))
 
+            # prepend puzzle slots -> [B, eff_padded_len + seq_len, D]
             embedding = torch.cat(
                 (
                     puzzle_embedding.view(
@@ -269,18 +261,23 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         return self.embed_scale * embedding
 
     def empty_carry(self, batch_size: int):
+        # allocate state on the same device as model parameters
+        device = next(self.parameters()).device
+        L = self.config.seq_len + self.eff_padded_len
         return TinyRecursiveReasoningModel_ACTV1InnerCarry(
             z_H=torch.empty(
                 batch_size,
-                self.config.seq_len + self.puzzle_emb_len,
+                L,
                 self.config.hidden_size,
                 dtype=self.forward_dtype,
+                device=device,
             ),
             z_L=torch.empty(
                 batch_size,
-                self.config.seq_len + self.puzzle_emb_len,
+                L,
                 self.config.hidden_size,
                 dtype=self.forward_dtype,
+                device=device,
             ),
         )
 
@@ -289,6 +286,8 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         reset_flag: torch.Tensor,
         carry: TinyRecursiveReasoningModel_ACTV1InnerCarry,
     ):
+        # reset_flag: [B] bool
+        # self.H_init / self.L_init are 1D; rely on broadcasting to [B, L, D]
         return TinyRecursiveReasoningModel_ACTV1InnerCarry(
             z_H=torch.where(reset_flag.view(-1, 1, 1), self.H_init, carry.z_H),
             z_L=torch.where(reset_flag.view(-1, 1, 1), self.L_init, carry.z_L),
@@ -310,10 +309,9 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         # Input encoding
         input_embeddings = self._input_embeddings(
             batch["inputs"], batch["puzzle_identifiers"]
-        )
+        )  # [B, L(+pad), D] if puzzle on
 
         # Forward iterations
-        it = 0
         z_H, z_L = carry.z_H, carry.z_L
         # H_cycles-1 without grad
         with torch.no_grad():
@@ -330,19 +328,19 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         new_carry = TinyRecursiveReasoningModel_ACTV1InnerCarry(
             z_H=z_H.detach(), z_L=z_L.detach()
         )  # New carry no grad
-        output = self.lm_head(z_H)[:, self.puzzle_emb_len :]
-        q_logits = self.q_head(z_H[:, 0]).to(
-            torch.float32
-        )  # Q-head; uses the first puzzle_emb position
+        # slice off puzzle prefix only if present
+        output = self.lm_head(z_H)[:, self.eff_padded_len :]
+        # Q-head looks at the first (puzzle) position; if eff_padded_len == 0, this becomes first token position
+        q_logits = self.q_head(z_H[:, 0]).to(torch.float32)
         return new_carry, output, (q_logits[..., 0], q_logits[..., 1])
 
 
 class TinyRecursiveReasoningModel_ACTV1(nn.Module):
     """ACT wrapper."""
 
-    def __init__(self, config_dict: dict):
+    def __init__(self, config: TinyRecursiveReasoningModel_ACTV1Config):
         super().__init__()
-        self.config = TinyRecursiveReasoningModel_ACTV1Config(**config_dict)
+        self.config = config
         self.inner = TinyRecursiveReasoningModel_ACTV1_Inner(self.config)
 
     @property
@@ -351,14 +349,21 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
 
     def initial_carry(self, batch: Dict[str, torch.Tensor]):
         batch_size = batch["inputs"].shape[0]
+        device = next(self.parameters()).device
 
+        # empty on device
+        inner = self.inner.empty_carry(batch_size)
+
+        # NOTE: current_data mirrors batch shapes, allocated on device
         return TinyRecursiveReasoningModel_ACTV1Carry(
-            inner_carry=self.inner.empty_carry(
-                batch_size
-            ),  # Empty is expected, it will be reseted in first pass as all sequences are halted.
-            steps=torch.zeros((batch_size,), dtype=torch.int32),
-            halted=torch.ones((batch_size,), dtype=torch.bool),  # Default to halted
-            current_data={k: torch.empty_like(v) for k, v in batch.items()},
+            inner_carry=inner,  # Empty is expected; it will be reset on first pass as all sequences are halted.
+            steps=torch.zeros((batch_size,), dtype=torch.int32, device=device),
+            halted=torch.ones(
+                (batch_size,), dtype=torch.bool, device=device
+            ),  # Default to halted
+            current_data={
+                k: torch.empty_like(v, device=device) for k, v in batch.items()
+            },
         )
 
     def forward(
@@ -369,11 +374,16 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
         # Update data, carry (removing halted sequences)
         new_inner_carry = self.inner.reset_carry(carry.halted, carry.inner_carry)
 
-        new_steps = torch.where(carry.halted, 0, carry.steps)
+        new_steps = torch.where(
+            carry.halted, torch.zeros_like(carry.steps), carry.steps
+        )
 
+        # where: if halted -> take batch[k] (fresh), else keep previous v
         new_current_data = {
             k: torch.where(
-                carry.halted.view((-1,) + (1,) * (batch[k].ndim - 1)), batch[k], v
+                carry.halted.view((-1,) + (1,) * (batch[k].ndim - 1)),
+                batch[k],
+                v,
             )
             for k, v in carry.current_data.items()
         }
@@ -400,7 +410,6 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
             if self.training and (self.config.halt_max_steps > 1):
                 # Halt signal
                 # NOTE: During evaluation, always use max steps, this is to guarantee the same halting steps inside a batch for batching purposes
-
                 if self.config.no_ACT_continue:
                     halted = halted | (q_halt_logits > 0)
                 else:
@@ -419,8 +428,8 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
                     # NOTE: No replay buffer and target networks for computing target Q-value.
                     # As batch_size is large, there're many parallel envs.
                     # Similar concept as PQN https://arxiv.org/abs/2407.04811
-                    _, _, (next_q_halt_logits, next_q_continue_logits), _, _ = (
-                        self.inner(new_inner_carry, new_current_data)
+                    _, _, (next_q_halt_logits, next_q_continue_logits) = self.inner(
+                        new_inner_carry, new_current_data
                     )
                     outputs["target_q_continue"] = torch.sigmoid(
                         torch.where(
