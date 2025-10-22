@@ -80,10 +80,22 @@ def get_trm_logits(text: str, model_path: str = None):
         logits = outputs["logits"]
 
     print("Logits shape:", logits.shape)
-    return logits
+
+    # --- Decode output tokens ---
+    # Take argmax to get predicted token IDs
+    pred_ids = torch.argmax(logits, dim=-1)
+    generated_text = tokenizer.decode(pred_ids[0], skip_special_tokens=True)
+
+    print("\n=== Model Inference Output ===")
+    print(generated_text)
+
+    return logits, generated_text
 
 
 if __name__ == "__main__":
     text = "你好，請介紹一下自己。"
-    logits = get_trm_logits(text)
+    logits, output_text = get_trm_logits(text)
+    print("\n=== Raw Logits ===")
     print(logits)
+    print("\n=== Decoded Output ===")
+    print(output_text)

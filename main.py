@@ -283,7 +283,7 @@ def main():
         seq_len=config["seq_len"],
         puzzle_emb_ndim=0,  # keep 0 to disable puzzle-emb; still pass dummy ids
         num_puzzle_identifiers=0,  # not used when puzzle_emb_ndim == 0
-        vocab_size=tokenizer.vocab_size,
+        vocab_size=teacher_model.config.vocab_size,
         H_cycles=6,
         L_cycles=3,
         H_layers=0,  # ignored by block

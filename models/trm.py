@@ -20,6 +20,7 @@ from models.layers import (
     CastedLinear,
 )
 from models.sparse_embedding import CastedSparseEmbedding
+from transformers.configuration_utils import PretrainedConfig
 
 IGNORE_LABEL_ID = -100
 
@@ -442,3 +443,7 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
         return TinyRecursiveReasoningModel_ACTV1Carry(
             new_inner_carry, new_steps, halted, new_current_data
         ), outputs
+
+class TinyRecursiveReasoningModelConfig(PretrainedConfig):
+    model_type = "trm_actv1"
+    keys_to_ignore_at_inference = [""]
