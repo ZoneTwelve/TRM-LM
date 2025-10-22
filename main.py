@@ -220,12 +220,12 @@ def distill_train_loop(
         print(f"Save the config into {config['output_dir'] / 'config.json'}")
     torch.save(
         student_model.state_dict(),
-        os.path.join(config["output_dir"], "student_trm_actv1.pt"),
+        os.path.join(config["output_dir"], "model.pt"),
     )
 
     # But we can still save tokenizer
     tokenizer.save_pretrained(config["output_dir"])
-    print(f"✅ Saved student weights to {config['output_dir']}/student_trm_actv1.pt")
+    print(f"✅ Saved student weights to {config['output_dir']}/model.pt")
 
 
 # ----------------------------
@@ -242,9 +242,9 @@ def main():
     # --- Distillation hyperparams ---
     config = {
         "device": device,
-        "learning_rate": 1e-4,
+        "learning_rate": 1e-3,
         "num_epochs": 3,
-        "temperature": 2.0,
+        "temperature": 4.0,
         "alpha_ce": 0.5,  # distillation (soft) weight
         "alpha_hard": 0.5,  # supervised (hard) weight
         "seq_len": 256,
@@ -301,7 +301,7 @@ def main():
         pos_encodings="rope",
         halt_max_steps=16,
         halt_exploration_prob=0.1,
-        forward_dtype="bfloat16",  # change to "float16" if your GPU lacks bfloat16
+        forward_dtype="float32",  # change to "float16" if your GPU lacks bfloat16
         mlp_t=False,
         puzzle_emb_len=16,
         no_ACT_continue=True,

@@ -5,9 +5,11 @@ from models.trm import (
     TinyRecursiveReasoningModel_ACTV1,
     TinyRecursiveReasoningModel_ACTV1Config,
 )
+import json
+from pathlib import Path
 
-
-def get_trm_logits(text: str, model_path: str = None):
+def get_trm_logits(text: str, model_path: str = "./distilled_trm_student"):
+    model_path = Path(model_path)
     # Device
     device = (
         torch.accelerator.current_accelerator().type
@@ -17,7 +19,7 @@ def get_trm_logits(text: str, model_path: str = None):
     print(f"Using device: {device}")
 
     # --- Tokenizer ---
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -43,33 +45,36 @@ def get_trm_logits(text: str, model_path: str = None):
         "puzzle_identifiers": torch.zeros((1, 1), dtype=torch.long, device=device),
     }
 
+    with open(model_path / "config.json", "r") as f:
+        conf = json.load(f)
+
     # --- Model config ---
     config = TinyRecursiveReasoningModel_ACTV1Config(
-        batch_size=1,
-        seq_len=256,
-        puzzle_emb_ndim=0,
-        num_puzzle_identifiers=0,
-        vocab_size=tokenizer.vocab_size,
-        H_cycles=6,
-        L_cycles=3,
-        H_layers=0,
-        L_layers=2,
-        hidden_size=512,
-        expansion=4.0,
-        num_heads=8,
-        pos_encodings="leanred",
-        halt_max_steps=16,
-        halt_exploration_prob=0.1,
-        forward_dtype="bfloat16",
-        mlp_t=False,
-        puzzle_emb_len=0,
-        no_ACT_continue=True,
+        batch_size=conf['batch_size'],
+        seq_len=conf['seq_len'],
+        puzzle_emb_ndim=conf['puzzle_emb_ndim'],
+        num_puzzle_identifiers=conf['num_puzzle_identifiers'],
+        vocab_size=conf['vocab_size'],
+        H_cycles=conf['H_cycles'],
+        L_cycles=conf['L_cycles'],
+        H_layers=conf['H_layers'],
+        L_layers=conf['L_layers'],
+        hidden_size=conf['hidden_size'],
+        expansion=conf['expansion'],
+        num_heads=conf['num_heads'],
+        pos_encodings=conf['pos_encodings'],
+        halt_max_steps=conf['halt_max_steps'],
+        halt_exploration_prob=conf['halt_exploration_prob'],
+        forward_dtype=conf['forward_dtype'],
+        mlp_t=conf['mlp_t'],
+        puzzle_emb_len=conf['puzzle_emb_len'],
+        no_ACT_continue=conf['no_ACT_continue'],
     )
 
     # --- Load model ---
     model = TinyRecursiveReasoningModel_ACTV1(config).to(device)
     if model_path:
-        model.load_state_dict(torch.load(model_path, map_location=device))
+        model.load_state_dict(torch.load(model_path / "model.pt", map_location=device))
         print(f"Loaded model weights from {model_path}")
 
     # --- Forward pass ---
