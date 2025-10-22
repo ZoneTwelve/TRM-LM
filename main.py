@@ -15,6 +15,9 @@ from models.trm import (
     TinyRecursiveReasoningModel_ACTV1,
 )
 
+import json
+from pathlib import Path
+
 IGNORE_LABEL_ID = -100
 
 
@@ -212,10 +215,14 @@ def distill_train_loop(
     # Save
     os.makedirs(config["output_dir"], exist_ok=True)
     # TinyRecursiveReasoningModel isn't a HF PreTrainedModel; save state_dict
+    with open(config['output_dir'] / "config.json", 'w') as f:
+        json.dump(student_model.config.__dict__, f, indent=2)
+        print(f"Save the config into {config['output_dir'] / 'config.json'}")
     torch.save(
         student_model.state_dict(),
         os.path.join(config["output_dir"], "student_trm_actv1.pt"),
     )
+
     # But we can still save tokenizer
     tokenizer.save_pretrained(config["output_dir"])
     print(f"✅ Saved student weights to {config['output_dir']}/student_trm_actv1.pt")
@@ -242,7 +249,7 @@ def main():
         "alpha_hard": 0.5,  # supervised (hard) weight
         "seq_len": 256,
         "batch_size": 1,
-        "output_dir": "./distilled_trm_student",
+        "output_dir": Path("./distilled_trm_student"),
     }
 
     # --- Tokenizer & teacher ---
@@ -299,6 +306,7 @@ def main():
         puzzle_emb_len=16,
         no_ACT_continue=True,
     )
+
     student_model = TinyRecursiveReasoningModel_ACTV1(model_conf)
 
     # --- Train ---
